@@ -37,6 +37,14 @@ public struct KreeRequest {
         let path: String
         var urlParameters: [String: String] = [:]
         var headers: [String: String] = [:]
+        
+        public init(method: KreeRequest.Method, backend: Backend, path: String, urlParameters: [String: String] = [:], headers: [String: String] = [:]) {
+            self.method = method
+            self.backend = backend
+            self.path = path
+            self.urlParameters = urlParameters
+            self.headers = headers
+        }
     }
     
     let encoder: JSONEncoder
