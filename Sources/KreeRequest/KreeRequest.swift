@@ -32,11 +32,11 @@ public struct KreeRequest {
     }
     
     public struct Config {
-        let method: Method
-        let backend: Backend
-        let path: String
-        var urlParameters: [String: String] = [:]
-        var headers: [String: String] = [:]
+        public var method: Method
+        public var backend: Backend
+        public var path: String
+        public var urlParameters: [String: String] = [:]
+        public var headers: [String: String] = [:]
         
         public init(method: KreeRequest.Method, backend: Backend, path: String, urlParameters: [String: String] = [:], headers: [String: String] = [:]) {
             self.method = method
