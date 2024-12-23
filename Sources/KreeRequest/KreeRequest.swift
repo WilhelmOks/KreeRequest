@@ -163,6 +163,12 @@ public struct KreeRequest {
         return try decoder.decode(Out.self, from: outData)
     }
     
+    public func requestJson<ApiError: Decodable & Sendable>(config: Config, string: String, apiError: ApiError.Type = EmptyError.self) async throws {
+        let inData = string.data(using: .utf8)
+        let urlRequest = makeURLRequest(config: config, body: inData)
+        try await requestData(urlRequest: urlRequest, apiError: apiError)
+    }
+    
     public func requestJson<Out: Decodable, ApiError: Decodable & Sendable>(config: Config, string: String, apiError: ApiError.Type = EmptyError.self) async throws -> Out {
         let inData = string.data(using: .utf8)
         let urlRequest = makeURLRequest(config: config, body: inData)
