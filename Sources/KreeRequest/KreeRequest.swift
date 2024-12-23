@@ -49,10 +49,10 @@ public struct KreeRequest {
     
     let encoder: JSONEncoder
     let decoder: JSONDecoder
-    let session: URLSession
+    let session: () -> (URLSession)
     let logger: Logger?
     
-    public init(encoder: JSONEncoder, decoder: JSONDecoder, session: URLSession = .init(configuration: .ephemeral), logger: Logger? = nil) {
+    public init(encoder: JSONEncoder, decoder: JSONDecoder, session: @autoclosure @escaping () -> (URLSession) = .init(configuration: .ephemeral), logger: Logger? = nil) {
         self.encoder = encoder
         self.decoder = decoder
         self.session = session
@@ -85,7 +85,7 @@ public struct KreeRequest {
     @discardableResult private func requestData<ApiError: Decodable & Sendable>(urlRequest: URLRequest, apiError: ApiError.Type = EmptyError.self) async throws -> (data: Data, headers: [AnyHashable: Any]) {
         let response: (Data, URLResponse)
         do {
-            response = try await session.data(for: urlRequest)
+            response = try await session().data(for: urlRequest)
         } catch {
             if let error = error as? URLError, error.code == .notConnectedToInternet {
                 throw Error<ApiError>.noInternet
