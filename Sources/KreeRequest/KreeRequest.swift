@@ -200,16 +200,14 @@ public struct KreeRequest {
 
 private extension HTTPClientRequest.Body {
     func data() async throws -> Data? {
-        var buffer = try await collect(upTo: .max)
-        return buffer.readData(length: buffer.readableBytes)
-        //return buffer.getData(at: 0, length: buffer.readableBytes)
+        let buffer = try await collect(upTo: .max)
+        return Data(buffer: buffer)
     }
 }
 
 private extension HTTPClientResponse.Body {
     func data() async throws -> Data? {
-        var buffer = try await collect(upTo: .max)
-        return buffer.readData(length: buffer.readableBytes)
-        //return buffer.getData(at: 0, length: buffer.readableBytes)
+        let buffer = try await collect(upTo: .max)
+        return Data(buffer: buffer)
     }
 }
