@@ -75,7 +75,7 @@ public struct KreeRequest {
             case .patch: .PATCH
         }
         if let body {
-            request.body = .bytes(.init(data: body))
+            request.body = .bytes(body, length: .known(Int64(body.count)))
         }
         config.headers.forEach {
             request.headers.add(name: $0.key, value: $0.value)
@@ -200,14 +200,16 @@ public struct KreeRequest {
 
 private extension HTTPClientRequest.Body {
     func data() async throws -> Data? {
-        let buffer = try await collect(upTo: .max)
-        return buffer.getData(at: 0, length: buffer.readableBytes)
+        var buffer = try await collect(upTo: .max)
+        return buffer.readData(length: buffer.readableBytes)
+        //return buffer.getData(at: 0, length: buffer.readableBytes)
     }
 }
 
 private extension HTTPClientResponse.Body {
     func data() async throws -> Data? {
-        let buffer = try await collect(upTo: .max)
-        return buffer.getData(at: 0, length: buffer.readableBytes)
+        var buffer = try await collect(upTo: .max)
+        return buffer.readData(length: buffer.readableBytes)
+        //return buffer.getData(at: 0, length: buffer.readableBytes)
     }
 }
