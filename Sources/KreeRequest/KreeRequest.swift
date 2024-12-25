@@ -1,20 +1,24 @@
 import Foundation
+import AsyncHTTPClient
 
 public struct KreeRequest {
     public enum Error<ApiError: Decodable & Sendable>: Swift.Error, CustomStringConvertible {
-        case notHttpResponse
-        case notFound
-        case noInternet
-        case apiError(_ error: ApiError)
-        case generalError
+        case apiError(status: Int, error: ApiError)
+        case apiErrorNotDecodable(status: Int, error: DecodingError)
+        case generalError(status: Int?, error: Swift.Error)
         
         public var description: String {
             switch self {
-            case .notHttpResponse: "Response is not HTTP"
-            case .notFound: "Not found"
-            case .noInternet: "No internet connection"
-            case .apiError(error: let error): "\(error)"
-            case .generalError: "General error"
+            case .apiError(let status, error: let error):
+                "HTTP status: \(status), ApiError: \(error)"
+            case .apiErrorNotDecodable(let status, let error): 
+                "HTTP status: \(status), ApiError not decodable: \(error)"
+            case .generalError(let status, let error):
+                if let status {
+                    "HTTP status: \(status), General error: \(error)"
+                } else {
+                    "General error: \(error)"
+                }
             }
         }
     }
@@ -37,40 +41,46 @@ public struct KreeRequest {
         public var path: String
         public var urlParameters: [String: String] = [:]
         public var headers: [String: String] = [:]
+        public var timeout: TimeInterval
         
-        public init(method: KreeRequest.Method, backend: Backend, path: String, urlParameters: [String: String] = [:], headers: [String: String] = [:]) {
+        public init(method: KreeRequest.Method, backend: Backend, path: String, urlParameters: [String: String] = [:], headers: [String: String] = [:], timeout: TimeInterval = 30) {
             self.method = method
             self.backend = backend
             self.path = path
             self.urlParameters = urlParameters
             self.headers = headers
+            self.timeout = timeout
         }
     }
     
     let encoder: JSONEncoder
     let decoder: JSONDecoder
-    let session: () -> (URLSession)
     let logger: Logger?
     
-    public init(encoder: JSONEncoder, decoder: JSONDecoder, session: @autoclosure @escaping () -> (URLSession) = .init(configuration: .ephemeral), logger: Logger? = nil) {
+    public init(encoder: JSONEncoder, decoder: JSONDecoder, logger: Logger? = nil) {
         self.encoder = encoder
         self.decoder = decoder
-        self.session = session
         self.logger = logger
     }
     
-    private func makeURLRequest(config: Config, body: Data?) -> URLRequest {
+    private func makeURLRequest(config: Config, body: Data?) -> (request: HTTPClientRequest, timeout: TimeInterval) {
         let urlQuery = Self.urlEncodedQueryString(from: config.urlParameters)
-        guard let url = URL(string: config.backend.baseURL + config.path + urlQuery) else {
-            fatalError("Couldn't create a URL")
+        let url = config.backend.baseURL + config.path + urlQuery
+        var request = HTTPClientRequest(url: url)
+        request.method = switch config.method {
+            case .get: .GET
+            case .put: .PUT
+            case .post: .POST
+            case .delete: .DELETE
+            case .patch: .PATCH
         }
-        var urlRequest = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
-        urlRequest.httpMethod = config.method.rawValue
-        urlRequest.httpBody = body
+        if let body {
+            request.body = .bytes(.init(data: body))
+        }
         config.headers.forEach {
-            urlRequest.setValue($0.value, forHTTPHeaderField: $0.key)
+            request.headers.add(name: $0.key, value: $0.value)
         }
-        return urlRequest
+        return (request, config.timeout)
     }
     
     public static func urlEncodedQueryString(from query: [String: String]) -> String {
@@ -82,36 +92,36 @@ public struct KreeRequest {
         return plusCorrection
     }
     
-    @discardableResult private func requestData<ApiError: Decodable & Sendable>(urlRequest: URLRequest, apiError: ApiError.Type = EmptyError.self) async throws -> (data: Data, headers: [AnyHashable: Any]) {
-        let response: (Data, URLResponse)
+    @discardableResult private func requestData<ApiError: Decodable & Sendable>(request: HTTPClientRequest, timeout: TimeInterval, apiError: ApiError.Type = EmptyError.self) async throws -> (data: Data, status: Int, headers: [String: String]) {
         do {
-            response = try await session().data(for: urlRequest)
-        } catch {
-            if let error = error as? URLError, error.code == .notConnectedToInternet {
-                throw Error<ApiError>.noInternet
-            } else {
-                throw Error<ApiError>.generalError
-            }
-        }
-        
-        if let httpResponse = response.1 as? HTTPURLResponse {
-            let data = response.0
+            let clientResponse = try await HTTPClient.shared.execute(request, timeout: .seconds(Int64(timeout)))
+            let outputData = try await clientResponse.body.data() ?? Data()
             
             if let logger {
-                let logInputString = urlRequest.httpBody.flatMap { Self.jsonString(data: $0, prettyPrinted: true) } ?? "(none)"
-                let logOutputString = !data.isEmpty ? Self.jsonString(data: data, prettyPrinted: true) ?? "-" : "(none)"
-                logger.log("\(urlRequest.httpMethod?.uppercased() ?? "?") \(urlRequest.url?.absoluteString ?? "")\nbody: \(logInputString)\nresponse: \(logOutputString)")
+                let inputData = try await request.body?.data()
+                let logInputString = inputData.flatMap { Self.jsonString(data: $0, prettyPrinted: true) } ?? "(none)"
+                let logOutputString = !outputData.isEmpty ? Self.jsonString(data: outputData, prettyPrinted: true) ?? "-" : "(none)"
+                let methodString = request.method.rawValue
+                logger.log("\(methodString) \(request.url)\nbody: \(logInputString)\nresponse: \(logOutputString)")
             }
+                
+            let statusCode = Int(clientResponse.status.code)
             
-            if (200..<300).contains(httpResponse.statusCode) {
-                return (data, httpResponse.allHeaderFields)
-            } else if httpResponse.statusCode == 404 {
-                throw Error<ApiError>.notFound
+            if (200..<300).contains(statusCode) {
+                let headers = Dictionary(uniqueKeysWithValues: clientResponse.headers.map { ($0.name, $0.value) })
+                return (outputData, statusCode, headers)
             } else {
-                throw Error<ApiError>.apiError(try decoder.decode(apiError, from: data))
+                do {
+                    let apiError = try decoder.decode(apiError, from: outputData)
+                    throw Error<ApiError>.apiError(status: statusCode, error: apiError)
+                } catch let decodingError as DecodingError {
+                    throw Error<ApiError>.apiErrorNotDecodable(status: statusCode, error: decodingError)
+                } catch {
+                    throw Error<ApiError>.generalError(status: statusCode, error: error)
+                }
             }
-        } else {
-            throw Error<ApiError>.notHttpResponse
+        } catch {
+            throw Error<ApiError>.generalError(status: nil, error: error)
         }
     }
     
@@ -141,49 +151,63 @@ public struct KreeRequest {
     
     public func requestJson<ApiError: Decodable & Sendable>(config: Config, apiError: ApiError.Type = EmptyError.self) async throws {
         let urlRequest = makeURLRequest(config: config, body: nil)
-        try await requestData(urlRequest: urlRequest, apiError: apiError)
+        try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError)
     }
     
     public func requestJson<In: Encodable, ApiError: Decodable & Sendable>(config: Config, json: In, apiError: ApiError.Type = EmptyError.self) async throws {
         let inData = try encoder.encode(json)
         let urlRequest = makeURLRequest(config: config, body: inData)
-        try await requestData(urlRequest: urlRequest, apiError: apiError)
+        try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError)
     }
     
     public func requestJson<Out: Decodable, ApiError: Decodable & Sendable>(config: Config, apiError: ApiError.Type = EmptyError.self) async throws -> Out {
         let urlRequest = makeURLRequest(config: config, body: nil)
-        let outData = try await requestData(urlRequest: urlRequest, apiError: apiError).data
+        let outData = try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError).data
         return try decoder.decode(Out.self, from: outData)
     }
     
     public func requestJson<In: Encodable, Out: Decodable, ApiError: Decodable & Sendable>(config: Config, json: In, apiError: ApiError.Type = EmptyError.self) async throws -> Out {
         let inData = try encoder.encode(json)
         let urlRequest = makeURLRequest(config: config, body: inData)
-        let outData = try await requestData(urlRequest: urlRequest, apiError: apiError).data
+        let outData = try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError).data
         return try decoder.decode(Out.self, from: outData)
     }
     
     public func requestJson<ApiError: Decodable & Sendable>(config: Config, string: String, apiError: ApiError.Type = EmptyError.self) async throws {
         let inData = string.data(using: .utf8)
         let urlRequest = makeURLRequest(config: config, body: inData)
-        try await requestData(urlRequest: urlRequest, apiError: apiError)
+        try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError)
     }
     
     public func requestJson<Out: Decodable, ApiError: Decodable & Sendable>(config: Config, string: String, apiError: ApiError.Type = EmptyError.self) async throws -> Out {
         let inData = string.data(using: .utf8)
         let urlRequest = makeURLRequest(config: config, body: inData)
-        let outData = try await requestData(urlRequest: urlRequest, apiError: apiError).data
+        let outData = try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError).data
         return try decoder.decode(Out.self, from: outData)
     }
     
     public func requestJson<ApiError: Decodable & Sendable>(config: Config, data: Data, apiError: ApiError.Type = EmptyError.self) async throws {
         let urlRequest = makeURLRequest(config: config, body: data)
-        try await requestData(urlRequest: urlRequest, apiError: apiError)
+        try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError)
     }
     
     public func requestJson<Out: Decodable, ApiError: Decodable & Sendable>(config: Config, data: Data, apiError: ApiError.Type = EmptyError.self) async throws -> Out {
         let urlRequest = makeURLRequest(config: config, body: data)
-        let outData = try await requestData(urlRequest: urlRequest, apiError: apiError).data
+        let outData = try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError).data
         return try decoder.decode(Out.self, from: outData)
+    }
+}
+
+private extension HTTPClientRequest.Body {
+    func data() async throws -> Data? {
+        let buffer = try await collect(upTo: .max)
+        return buffer.getData(at: 0, length: buffer.readableBytes)
+    }
+}
+
+private extension HTTPClientResponse.Body {
+    func data() async throws -> Data? {
+        let buffer = try await collect(upTo: .max)
+        return buffer.getData(at: 0, length: buffer.readableBytes)
     }
 }
