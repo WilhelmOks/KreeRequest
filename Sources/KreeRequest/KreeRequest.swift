@@ -108,7 +108,10 @@ public struct KreeRequest {
             let statusCode = Int(clientResponse.status.code)
             
             if (200..<300).contains(statusCode) {
-                let headers = Dictionary(uniqueKeysWithValues: clientResponse.headers.map { ($0.name, $0.value) })
+                var headers: [String: String] = [:]
+                for header in clientResponse.headers {
+                    headers[header.name] = header.value
+                }
                 return (outputData, statusCode, headers)
             } else {
                 do {
