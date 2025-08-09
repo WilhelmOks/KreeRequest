@@ -1,7 +1,7 @@
 import Foundation
 import AsyncHTTPClient
 
-public struct KreeRequest {
+public struct KreeRequest: Sendable {
     public enum Error<ApiError: Decodable & Sendable>: Swift.Error, CustomStringConvertible {
         case apiError(status: Int, error: ApiError)
         case apiErrorNotDecodable(status: Int, error: DecodingError)
