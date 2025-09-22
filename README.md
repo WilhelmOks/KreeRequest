@@ -1,5 +1,7 @@
 # KreeRequest
-A lightweight http request helper for JSON REST APIs
+A lightweight http request helper for JSON REST APIs.
+
+Implemented with `AsyncHTTPClient` rather than `URLSession` and can be used on Linux and Windows.
 
 _The name Kree comes from the TV Series Stargate SG-1, where it means something like "Hey!" in the alien language of the Goa'Uld._
 
