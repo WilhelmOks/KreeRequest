@@ -1,5 +1,6 @@
 import Foundation
 import AsyncHTTPClient
+import NIOSSL
 
 public struct KreeRequest: Sendable {
     public enum Error<ApiError: Decodable & Sendable>: Swift.Error, CustomStringConvertible {
@@ -42,14 +43,24 @@ public struct KreeRequest: Sendable {
         public var urlParameters: [String: String] = [:]
         public var headers: [String: String] = [:]
         public var timeout: TimeInterval
+        public var ignoreCertificateErrors: Bool
         
-        public init(method: KreeRequest.Method, backend: Backend, path: String, urlParameters: [String: String] = [:], headers: [String: String] = [:], timeout: TimeInterval = 30) {
+        public init(
+            method: KreeRequest.Method,
+            backend: Backend,
+            path: String,
+            urlParameters: [String: String] = [:],
+            headers: [String: String] = [:],
+            timeout: TimeInterval = 30,
+            ignoreCertificateErrors: Bool = false
+        ) {
             self.method = method
             self.backend = backend
             self.path = path
             self.urlParameters = urlParameters
             self.headers = headers
             self.timeout = timeout
+            self.ignoreCertificateErrors = ignoreCertificateErrors
         }
     }
     
@@ -57,13 +68,23 @@ public struct KreeRequest: Sendable {
     let decoder: JSONDecoder
     let logger: Logger?
     
+    private static let insecureHTTPClient: HTTPClient = {
+        var tlsConfig = TLSConfiguration.makeClientConfiguration()
+        tlsConfig.certificateVerification = .none
+        var clientConfig = HTTPClient.Configuration()
+        clientConfig.tlsConfiguration = tlsConfig
+        return HTTPClient(eventLoopGroupProvider: .singleton, configuration: clientConfig)
+    }()
+    
+    private static let secureHTTPClient = HTTPClient(eventLoopGroupProvider: .singleton)
+    
     public init(encoder: JSONEncoder, decoder: JSONDecoder, logger: Logger? = nil) {
         self.encoder = encoder
         self.decoder = decoder
         self.logger = logger
     }
     
-    private func makeURLRequest(config: Config, body: Data?) -> (request: HTTPClientRequest, timeout: TimeInterval) {
+    private func makeURLRequest(config: Config, body: Data?) -> HTTPClientRequest {
         let urlQuery = Self.urlEncodedQueryString(from: config.urlParameters)
         let url = config.backend.baseURL + config.path + urlQuery
         var request = HTTPClientRequest(url: url)
@@ -80,7 +101,7 @@ public struct KreeRequest: Sendable {
         config.headers.forEach {
             request.headers.add(name: $0.key, value: $0.value)
         }
-        return (request, config.timeout)
+        return request
     }
     
     public static func urlEncodedQueryString(from query: [String: String]) -> String {
@@ -92,9 +113,10 @@ public struct KreeRequest: Sendable {
         return plusCorrection
     }
     
-    @discardableResult private func requestData<ApiError: Decodable & Sendable>(request: HTTPClientRequest, timeout: TimeInterval, apiError: ApiError.Type = EmptyError.self) async throws -> (data: Data, status: Int, headers: [String: String]) {
+    @discardableResult private func requestData<ApiError: Decodable & Sendable>(request: HTTPClientRequest, config: Config, apiError: ApiError.Type = EmptyError.self) async throws -> (data: Data, status: Int, headers: [String: String]) {
         do {
-            let clientResponse = try await HTTPClient.shared.execute(request, timeout: .seconds(Int64(timeout)))
+            let client = config.ignoreCertificateErrors ? Self.insecureHTTPClient : Self.secureHTTPClient
+            let clientResponse = try await client.execute(request, timeout: .seconds(Int64(config.timeout)))
             let outputData = try await clientResponse.body.data() ?? Data()
             
             if let logger {
@@ -154,49 +176,49 @@ public struct KreeRequest: Sendable {
     
     public func requestJson<ApiError: Decodable & Sendable>(config: Config, apiError: ApiError.Type = EmptyError.self) async throws {
         let urlRequest = makeURLRequest(config: config, body: nil)
-        try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError)
+        try await requestData(request: urlRequest, config: config, apiError: apiError)
     }
     
     public func requestJson<In: Encodable, ApiError: Decodable & Sendable>(config: Config, json: In, apiError: ApiError.Type = EmptyError.self) async throws {
         let inData = try encoder.encode(json)
         let urlRequest = makeURLRequest(config: config, body: inData)
-        try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError)
+        try await requestData(request: urlRequest, config: config, apiError: apiError)
     }
     
     public func requestJson<Out: Decodable, ApiError: Decodable & Sendable>(config: Config, apiError: ApiError.Type = EmptyError.self) async throws -> Out {
         let urlRequest = makeURLRequest(config: config, body: nil)
-        let outData = try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError).data
+        let outData = try await requestData(request: urlRequest, config: config, apiError: apiError).data
         return try decoder.decode(Out.self, from: outData)
     }
     
     public func requestJson<In: Encodable, Out: Decodable, ApiError: Decodable & Sendable>(config: Config, json: In, apiError: ApiError.Type = EmptyError.self) async throws -> Out {
         let inData = try encoder.encode(json)
         let urlRequest = makeURLRequest(config: config, body: inData)
-        let outData = try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError).data
+        let outData = try await requestData(request: urlRequest, config: config, apiError: apiError).data
         return try decoder.decode(Out.self, from: outData)
     }
     
     public func requestJson<ApiError: Decodable & Sendable>(config: Config, string: String, apiError: ApiError.Type = EmptyError.self) async throws {
         let inData = string.data(using: .utf8)
         let urlRequest = makeURLRequest(config: config, body: inData)
-        try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError)
+        try await requestData(request: urlRequest, config: config, apiError: apiError)
     }
     
     public func requestJson<Out: Decodable, ApiError: Decodable & Sendable>(config: Config, string: String, apiError: ApiError.Type = EmptyError.self) async throws -> Out {
         let inData = string.data(using: .utf8)
         let urlRequest = makeURLRequest(config: config, body: inData)
-        let outData = try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError).data
+        let outData = try await requestData(request: urlRequest, config: config, apiError: apiError).data
         return try decoder.decode(Out.self, from: outData)
     }
     
     public func requestJson<ApiError: Decodable & Sendable>(config: Config, data: Data, apiError: ApiError.Type = EmptyError.self) async throws {
         let urlRequest = makeURLRequest(config: config, body: data)
-        try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError)
+        try await requestData(request: urlRequest, config: config, apiError: apiError)
     }
     
     public func requestJson<Out: Decodable, ApiError: Decodable & Sendable>(config: Config, data: Data, apiError: ApiError.Type = EmptyError.self) async throws -> Out {
         let urlRequest = makeURLRequest(config: config, body: data)
-        let outData = try await requestData(request: urlRequest.request, timeout: urlRequest.timeout, apiError: apiError).data
+        let outData = try await requestData(request: urlRequest, config: config, apiError: apiError).data
         return try decoder.decode(Out.self, from: outData)
     }
 }
