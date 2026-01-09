@@ -1,6 +1,7 @@
 import Foundation
 import AsyncHTTPClient
 import NIOSSL
+import Retry
 
 public struct KreeRequest: Sendable {
     public enum Error<ApiError: Decodable & Sendable>: Swift.Error, CustomStringConvertible {
@@ -43,6 +44,7 @@ public struct KreeRequest: Sendable {
         public var urlParameters: [String: String] = [:]
         public var headers: [String: String] = [:]
         public var timeout: TimeInterval
+        public var retries: Int
         public var ignoreCertificateErrors: Bool
         
         public init(
@@ -52,7 +54,8 @@ public struct KreeRequest: Sendable {
             urlParameters: [String: String] = [:],
             headers: [String: String] = [:],
             timeout: TimeInterval = 30,
-            ignoreCertificateErrors: Bool = false
+            retries: Int = 0,
+            ignoreCertificateErrors: Bool = false,
         ) {
             self.method = method
             self.backend = backend
@@ -60,6 +63,7 @@ public struct KreeRequest: Sendable {
             self.urlParameters = urlParameters
             self.headers = headers
             self.timeout = timeout
+            self.retries = retries
             self.ignoreCertificateErrors = ignoreCertificateErrors
         }
     }
@@ -114,39 +118,41 @@ public struct KreeRequest: Sendable {
     }
     
     @discardableResult private func requestData<ApiError: Decodable & Sendable>(request: HTTPClientRequest, config: Config, apiError: ApiError.Type = EmptyError.self) async throws -> (data: Data, status: Int, headers: [String: String]) {
-        do {
-            let client = config.ignoreCertificateErrors ? Self.insecureHTTPClient : Self.secureHTTPClient
-            let clientResponse = try await client.execute(request, timeout: .seconds(Int64(config.timeout)))
-            let outputData = try await clientResponse.body.data() ?? Data()
-            
-            if let logger {
-                let inputData = try await request.body?.data()
-                let logInputString = inputData.flatMap { Self.jsonString(data: $0, prettyPrinted: true) } ?? "(none)"
-                let logOutputString = !outputData.isEmpty ? Self.jsonString(data: outputData, prettyPrinted: true) ?? "-" : "(none)"
-                let methodString = request.method.rawValue
-                logger.log("\(methodString) \(request.url)\nbody: \(logInputString)\nresponse: \(logOutputString)")
-            }
+        try await retry(maxAttempts: config.retries + 1, backoff: .default(baseDelay: .seconds(0.1), maxDelay: .seconds(3))) {
+            do {
+                let client = config.ignoreCertificateErrors ? Self.insecureHTTPClient : Self.secureHTTPClient
+                let clientResponse = try await client.execute(request, timeout: .seconds(Int64(config.timeout)))
+                let outputData = try await clientResponse.body.data() ?? Data()
                 
-            let statusCode = Int(clientResponse.status.code)
-            
-            if (200..<300).contains(statusCode) {
-                var headers: [String: String] = [:]
-                for header in clientResponse.headers {
-                    headers[header.name] = header.value
+                if let logger {
+                    let inputData = try await request.body?.data()
+                    let logInputString = inputData.flatMap { Self.jsonString(data: $0, prettyPrinted: true) } ?? "(none)"
+                    let logOutputString = !outputData.isEmpty ? Self.jsonString(data: outputData, prettyPrinted: true) ?? "-" : "(none)"
+                    let methodString = request.method.rawValue
+                    logger.log("\(methodString) \(request.url)\nbody: \(logInputString)\nresponse: \(logOutputString)")
                 }
-                return (outputData, statusCode, headers)
-            } else {
-                do {
-                    let apiError = try decoder.decode(apiError, from: outputData)
-                    throw Error<ApiError>.apiError(status: statusCode, error: apiError)
-                } catch let decodingError as DecodingError {
-                    throw Error<ApiError>.apiErrorNotDecodable(status: statusCode, error: decodingError)
-                } catch {
-                    throw Error<ApiError>.generalError(status: statusCode, error: error)
+                
+                let statusCode = Int(clientResponse.status.code)
+                
+                if (200..<300).contains(statusCode) {
+                    var headers: [String: String] = [:]
+                    for header in clientResponse.headers {
+                        headers[header.name] = header.value
+                    }
+                    return (outputData, statusCode, headers)
+                } else {
+                    do {
+                        let apiError = try decoder.decode(apiError, from: outputData)
+                        throw Error<ApiError>.apiError(status: statusCode, error: apiError)
+                    } catch let decodingError as DecodingError {
+                        throw Error<ApiError>.apiErrorNotDecodable(status: statusCode, error: decodingError)
+                    } catch {
+                        throw Error<ApiError>.generalError(status: statusCode, error: error)
+                    }
                 }
+            } catch {
+                throw Error<ApiError>.generalError(status: nil, error: error)
             }
-        } catch {
-            throw Error<ApiError>.generalError(status: nil, error: error)
         }
     }
     
